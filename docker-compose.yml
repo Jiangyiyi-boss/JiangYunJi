@@ -1,0 +1,221 @@
+# ==================== 匠韵集 — Docker Compose 编排 ====================
+# 启动: docker compose up -d
+# 查看日志: docker compose logs -f
+# 停止: docker compose down
+# 停止并清除数据: docker compose down -v
+#
+# 敏感配置（数据库密码、JWT 密钥、支付宝参数等）统一从本目录 .env 文件读取，
+# 模板见 .env.example（.env 本身已被 .gitignore 排除，不会入库）。
+
+services:
+  # ======================== 数据库 ========================
+
+  mysql:
+    image: mysql:8.0
+    container_name: jyj-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在根目录 .env 中设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: project2_db
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: jyj-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: jyj-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      - /opt/jiang-yun-ji/ik:/usr/share/elasticsearch/plugins/ik
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -E 'green|yellow' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  mongodb:
+    image: mongo:6
+    container_name: jyj-mongodb
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: jyj-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ======================== 后端 ========================
+
+  backend:
+    build: ./backend
+    container_name: jyj-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # ---- 数据库（密码从根目录 .env 读取）----
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      DB_NAME: project2_db
+      # ---- Redis ----
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      # ---- Elasticsearch ----
+      ES_HOST: elasticsearch
+      ES_PORT: 9200
+      ES_INDEX: products
+      ES_COURSE_INDEX: courses
+      ES_TIMEOUT: 5
+      # ---- MongoDB ----
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_DB: jiangyunji_forum
+      # ---- RabbitMQ ----
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      RABBITMQ_VHOST: /
+      # ---- JWT（从根目录 .env 读取）----
+      SECRET_KEY: ${SECRET_KEY:?请在根目录 .env 中设置 SECRET_KEY}
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 1440
+      # ---- Admin ----
+      ADMIN_SECRET_KEY: ${ADMIN_SECRET_KEY:?请在根目录 .env 中设置 ADMIN_SECRET_KEY}
+      # ---- AI：DeepSeek（LangGraph/LangChain，密钥由 backend/.env 提供）----
+      APP_NAME: 匠韵集
+      APP_VERSION: 1.0.0
+      # ---- 短信（阿里云号码认证）：密钥由 backend/.env 提供 ----
+      # ---- 支付（回调地址从根目录 .env 读取，生产为服务器公网域名/IP）----
+      ALIPAY_APP_ID: ${ALIPAY_APP_ID:?请在根目录 .env 中设置 ALIPAY_APP_ID}
+      ALIPAY_APP_PRIVATE_KEY_PATH: keys/app_private_key.pem
+      ALIPAY_PUBLIC_KEY_PATH: keys/alipay_public_key.pem
+      ALIPAY_NOTIFY_URL: ${ALIPAY_NOTIFY_URL:?请在根目录 .env 中设置 ALIPAY_NOTIFY_URL}
+      ALIPAY_RETURN_URL: ${ALIPAY_RETURN_URL:?请在根目录 .env 中设置 ALIPAY_RETURN_URL}
+      ALIPAY_DEBUG: ${ALIPAY_DEBUG:-true}
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/keys:/app/keys:ro
+    ports:
+      - "8000:8000"
+
+  # ======================== 延时支付消费者 ========================
+
+  consumer:
+    build: ./backend
+    container_name: jyj-consumer
+    restart: unless-stopped
+    command: python consumer.py
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      DB_NAME: project2_db
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      RABBITMQ_VHOST: /
+      ES_HOST: elasticsearch
+      ES_PORT: 9200
+      ES_INDEX: products
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_DB: jiangyunji_forum
+
+  # ======================== 前端 Nginx ========================
+  # 前端本地构建后 scp dist/ 到服务器，nginx 容器直接挂载静态文件，无需在服务器上构建
+
+  nginx:
+    image: nginx:alpine
+    container_name: jyj-nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+
+# ======================== 数据卷 ========================
+
+volumes:
+  mysql_data:
+  redis_data:
+  es_data:
+  mongo_data:
+  rabbitmq_data:
